@@ -1,0 +1,690 @@
+---
+title: "Midterm Project Clustering"
+author: "Bernard Banyuls"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Libraries used across the project:
+```{r,output = FALSE, warning=FALSE, message=FALSE}
+
+rm(list=ls()) 
+
+library(tidyverse)
+library(eurostat)
+library(leaflet)
+library(sf)
+library(scales)
+library(cowplot)
+library(ggthemes)
+library(dplyr)
+library(tidyr)
+library(plotly)
+library(factoextra)
+library(dplyr)
+library(sf)
+library(ggplot2)
+library(scales)
+library(ggsci)
+library(wesanderson)
+library(readxl)
+library(ConvergenceClubs)
+library(tidyverse)
+library(haven)
+library(ggrepel)
+library(isoband)
+library(readxl)
+library(mFilter)
+```
+
+
+```{r}
+tgs00003  <- get_eurostat("tgs00003", time_format = "num")
+```
+
+
+## Objective
+
+
+There are two main reasons to analyze the existence of clusters in terms of any statistical variable. The first reason is that analyzing these clusters allows us to study the evolution of each country compared to the rest of the European Union countries to evaluate whether sustained and equal growth has been achieved in the European Union. On the other hand, the second reason is that clustering the countries or regions of the European Union allows us to focus aid on those countries most in need of assistance (Saba, 2021), while also giving the criteria to quantify how much help each cluster would need.
+
+For that matter this project has the objective of clustering regions of the NUTS2, in terms of regional gross domestic product (in million EUR). Throughout the project several clustering algorithms will be used such as the famous KMeans and the ClubConvergence algorithm as a way to explain the advantages/disadvantages KMeans has and to compare both type of algorithms in this type of objective.
+
+
+## Load the Data
+
+```{r}
+tgs00003  <- get_eurostat("tgs00003", time_format = "num") 
+#Eurostat package Regional gross domestic product by NUTS 2 regions - million EUR"
+```
+
+
+## Descriptive Analysis
+As we are working with longitudinal data the descriptive analysis is really straightforward and simple as we can plot visually the data, as we are working with NUTS2 regions (334 regions approximately) it is difficult to visualize in a line graph to show the evolution of the values across the years, if we were working just with the countries we would not have this "problem" for that matter the best to visualize and do a descriptive analysis is to plot the map of the NUTS2 regions.
+
+Before plotting the data we can convert the data to a wide format (as a way to do summary() per year rather than for the entire value):
+```{r}
+tgs00003_wide <- tgs00003 |> 
+  pivot_wider(names_from = TIME_PERIOD, values_from = values)
+
+summary(tgs00003_wide)
+```
+
+As we can observe in the summary, there may be some "region" with value 0, and 2022 has 18 missing values, for that matter we will just consider from 2011 up to 2021.
+
+According to  the [Nomenclature of territorial units for statistics -
+NUTS 2016/EU-28](https://ec.europa.eu/eurostat/documents/3859598/9397402/KS-GQ-18-007-EN-N.pdf), Huzz would be "Extra regio NUTS2" for that matter we will delete that region and the 2022 year.
+
+
+
+```{r}
+tgs00003_wide <- tgs00003_wide |> 
+  select(-"2022") |> 
+  filter( geo != "HUZZ")
+
+summary(tgs00003_wide)
+```
+
+If we wanted to impute the NA values we could perform and auto.arima model from library(forecast) but as the values for the 2022 year are still "provisional" according to the Eurostat database they may change in the near future so there is no reason to take them in our analysis.
+
+What we observe is a high difference between the lowest value and the highest value across the years, we observe also that the mean is bigger than the median showing that there is skewness on our data.
+
+```{r}
+tgs_longvalues <- tgs00003_wide[, -c(1:3)]
+
+dataplot <- pivot_longer(tgs_longvalues, cols = `2011`:`2021`, names_to = "Year", values_to = "Value")
+
+plot_ly(dataplot, x = ~Value, type = 'histogram', color = ~factor(Year)) |> 
+  layout(barmode = 'stack', title = 'Interactive Histogram for each Year', xaxis = list(title = 'Values'), yaxis = list(title = 'Frequency'))
+
+```
+
+As we can observe in this interactive plot (values are stacked) it is that there are some regions with high values (capital cities regions or main regions in each country) this is one of the main issues we will have throughout the analysis although we can scale the data in order to avoid this problem as KMeans is really sensitive to "outliers" or high values or disparity across the data.
+We can observe that there are some NUTS2 regions that have higher values compared to the rest such as the case of Paris which is the highest value across all years among other capital cities/regions that distort the Kmeans results.
+
+## Visual Representation
+
+```{r}
+SHP_2_3035  <- get_eurostat_geospatial(
+  resolution = 10,
+  nuts_level = 2,
+  year = 2021,
+  crs = 3035)
+```
+
+```{r}
+tgs00003_shp <- tgs00003 |>
+  filter(TIME_PERIOD == 2019) |>            
+  select(geo, values) |>
+  right_join(SHP_2_3035, by = "geo") |> 
+  st_as_sf()
+```
+
+```{r}
+tgs00003_shp |> 
+  ggplot(aes(fill = values)) +
+  geom_sf(
+    size = 0.1, 
+    color = "#333333"
+  ) +
+  scale_fill_distiller(
+    palette = "YlGnBu",
+    direction = 1, 
+    name = "EUR Millions ",
+    breaks = pretty_breaks(10),
+    na.value = "gray80",
+    guide = guide_colorbar(
+      direction = "vertical", 
+      title.position = "top", 
+      label.position = "right",  
+      barwidth = unit(0.4, "cm"), 
+      barheight = unit(6, "cm"),  
+      ticks = TRUE, 
+    )
+  ) + 
+  scale_x_continuous(limits = c(2500000, 7000000)) +
+  scale_y_continuous(limits = c(1600000, 5200000)) +
+  labs(
+    title = "Regional gross domestic product",
+    subtitle = "by NUTS 2 regions - million EUR",
+    caption = "Data: Eurostat tgs00003"
+  ) +
+  theme_void() +
+  theme(legend.position = c(0.94, 0.70))
+```
+
+```{r}
+SHP_2_3035  <- get_eurostat_geospatial(
+  resolution = 10,
+  nuts_level = 2,
+  year = 2021,
+  crs = 3035)
+```
+
+```{r}
+tgs00003_shp <- tgs00003 |>
+  select(geo, values) |> 
+  right_join(SHP_2_3035, by = "geo") |> 
+  st_as_sf()
+```
+
+```{r}
+tgs00003_shp |> 
+  ggplot(aes(fill = values)) +
+  geom_sf(
+    size = 0.1, 
+    color = "#333333"
+  ) +
+  scale_fill_distiller(
+    palette = "YlGnBu",
+    direction = 1, 
+    name = "EUR Millions ",
+    breaks = pretty_breaks(10),
+    na.value = "gray80",
+    guide = guide_colorbar(
+      direction = "vertical", 
+      title.position = "top", 
+      label.position = "right",  
+      barwidth = unit(0.4, "cm"), 
+      barheight = unit(6, "cm"),  
+      ticks = TRUE, 
+    )
+  ) + 
+  scale_x_continuous(limits = c(2500000, 7000000)) +
+  scale_y_continuous(limits = c(1600000, 5200000)) +
+  labs(
+    title = "Regional gross domestic product",
+    subtitle = "by NUTS 2 regions - million EUR",
+    caption = "Data: Eurostat tgs00003"
+  ) +
+  theme_void() +
+  theme(legend.position = c(0.94, 0.70))
+```
+
+
+```{r}
+plot_europe <- function(year) {
+  tgs00003_shp_filtered <- tgs00003 |>
+    filter(TIME_PERIOD == year) |>
+    select(geo, values) |>
+    right_join(SHP_2_3035, by = "geo") |> 
+    st_as_sf()
+
+  ggplot(tgs00003_shp_filtered, aes(fill = values)) +
+    geom_sf(
+      size = 0.1, 
+      color = "#333333"
+    ) +
+    scale_fill_distiller(
+      palette = "YlGnBu",
+      direction = 1, 
+      name = "EUR Millions ",
+      breaks = pretty_breaks(10),
+      na.value = "gray80",
+      guide = guide_colorbar(
+        direction = "vertical", 
+        title.position = "top", 
+        label.position = "right",  
+        barwidth = unit(0.4, "cm"), 
+        barheight = unit(6, "cm"),  
+        ticks = TRUE
+      ),
+      labels = scales::label_number(accuracy = 1) # Format labels without scaling
+    ) + 
+    scale_x_continuous(limits = c(2500000, 7000000)) +
+    scale_y_continuous(limits = c(1600000, 5200000)) +
+    labs(
+      title = "Regional gross domestic product",
+      subtitle = paste("by NUTS 2 regions - million EUR, Year:", year),
+      caption = "Data: Eurostat tgs00003"
+    ) +
+    theme_void() +
+    theme(legend.position = c(0.94, 0.70))
+}
+
+```
+
+```{r}
+plot_europe(2015)
+```
+
+```{r}
+plot_europe(2017)
+```
+
+## PCA and interpretation
+
+The next step of the project is to perform a PCA and interpret the information we obtain.
+
+```{r}
+X <- tgs00003_wide |> select("2011":"2021")
+regions <- tgs00003_wide$geo
+
+pca = prcomp(X, scale=T)
+summary(pca)
+
+fviz_screeplot(pca, addlabels = TRUE)
+```
+
+As we can observe in the results, we only need one component to nearly explain all the variability across our data (due to being longitudinal data, that is  to say, one variable across the years). For that matter it would be preferable to take the base value and its yearly growth across the years in case we wanted to reduce the number of columns or perform certain type of clustering or algorithms such as BetaConvergence analysis, if we had countries (a small sample such as EU countries) if we wanted to cluster them according to only one variable it would be recommended to use base value and growth to keep a suitable proportion between variables and "rows". 
+
+In the case of using PC for longitudinal data there are other advanced methodologies that are recommended for this type of data would be for example the [Functional PCA](https://cran.r-project.org/web/packages/fdapace/vignettes/fdapaceVig.html)
+
+```{r}
+barplot(pca$rotation[,1], las=2, col="darkblue")
+```
+
+As we observe in this plot following our previous hypothesis each year has the same importance.
+If were working with other type of data, the analysis for each PC and how PC works would be different as there would be interpretation on which variables account for the greatest importance in terms of explaining the variability of the data. 
+
+To simplify the objective of the PC analysis, it is done to reduce the amount of variables in a data set maintaining patterns and trends across the data, this is done through creating new variables that are linear combinations of others using the eigenvectors and eigenvalues to obtain the covariance matrix used to obtain the components.
+
+
+```{r}
+fviz_contrib(pca, choice = "var", axes = 1)
+```
+
+In this case we observe that the year with the "highest" contribution would be 2017 although they are all nearly exactly the same.
+
+The red dashed line on the graph above indicates the expected average contribution.
+If the contribution of the variables were uniform, the expected value would be 1/length(variables) = 1/11 = 9%
+
+
+```{r}
+regions[order(pca$x[,1])][1:10]
+regions[order(pca$x[,1], decreasing=T)][1:10]
+```
+
+If we observe the values we get, the first 10 regions correspond to the "richest" regions in our original data set, the PC1 is taking into account the trend for that matter we only observe.
+
+In this type of data PCA does not seem suitable of adding information, as getting only one component would not make sense to cluster according to only that component. Although it may be interesting to "add" more components that would come from other longitudinal data of other variables, that is to say if this component accounts for the GDP per region across 2011 to 2021 it would be interesting to add other variables such as Unemployment rate per region across 2011 to 2021, and have another component explaining most of the variability forming that way a new data set that takes into account several different variables across the same set of years. Although we could potentially do the same taking base year and growth for each variable rather than using components of each subset of data to perform clustering or any other type of analysis.
+
+Technically we should perform a Functional principal component analysis (FPCA) which is a "powerful tool for modeling longitudinal data observed at various time points. FPCA aims to decompose the latent stochastic process into a linear combination of functional principal components (FPCs), which maximize the variation in the randomly observed curves"(Shi et al., 2020). https://www.sfu.ca/~lwa68/publications/StatisticsInMedicine-2020-Shi-FPCA4LongitudinalDataWithInformative.pdf
+
+That is to say, in this case PCA does not give us any further insight and reducing the variables into the first component for computing costs (that is to say, usually PCA is used to simplify high-dimensional data for visualization purposes, or reduce computing costs) in this case we are better off taking into account the base value and its growth if we wanted to represent the data in a two-dimension way, although we can work with time series as we are only taking into account one variable.
+
+In the case we were working for example with clients data (in a business perspective) PCA could be used to analyze which variables explain more in terms of variability and as a way to represent the data in two-dimensions and reduce computing costs in case a machine learning algorithm is computed. For example, lets imagine we have data for each client of an imaginary business that is the money spent, the frequency, the recency, the age among other variables, we can use the PCA to analyze which variables explain most the variability in the data, to visualize the different type of clients in a plot (if we do any type of clustering) or if we want to forecast or apply any machine learning algorithm that is computationally expensive (if we have a lot of clients reducing the variables may help in terms of processing the data) such as XGBoost among other algorithms.
+
+## KMeans
+
+There are several algorithms for clustering, but the standard one is the Hartigan-Wong algorithm in which the total variance of the individuals within a cluster is defined as the sum of the squared Euclidean distances between the elements and the corresponding centroid. The centroid of each group is the center of the group that corresponds to the mean value of each individual in that cluster (Hartigan and Wong, 1979).
+
+The clustering algorithm follows the following processes:
+
+*	The algorithm randomly places k centroids in the data as initial centroids. And then, each individual $x_i$ is assigned to the nearest centroid using the Euclidean distance
+
+*	The next step is to calculate the average value of each cluster that becomes the new centroid and the individuals $x_i$ are reassigned to the new centroids $μ_k$.
+
+*	The previous step is repeated until the centroids do not change, thus achieving that the total variation of individuals within a cluster is the minimum possible. 
+
+
+
+There are several ways to analyze the optimal number of centroids or clusters, such as the elbow method and the silhouette method.
+
+The elbow method uses the mean distance of the observations to their respective centroid, i.e., the total variance of the individuals within a cluster. The higher the number of clusters, the lower the variance since the maximum number of clusters is equal to the number of observations, so the optimal number of clusters will be the one that an increase in the number does not substantially improve the variance within a cluster.
+
+Silhouette analysis is used to analyze the quality of clustering. It measures the separation distance between different clusters. It tells us how close each observation of a cluster is to the observations of other clusters. The range of this method whose purpose is to analyze how many clusters range from -1 to 1, and the closer the value is to 1, it means that the observation is far away from the neighboring clusters. If the coefficient is 0 it means that it is very near or on the border between the two clusters. A negative value would indicate that it is in the wrong cluster.
+
+There are several types of algorithms to decide how many clusters there should be in the data, the best option would be to perform as much of them as possible to decide the optimal number of clusters although in the case of businesses we may want a specific number of clusters depending on different reasons.
+
+```{r}
+
+library(factoextra)
+fviz_nbclust(X,kmeans) #silhhouette 
+
+```
+
+In this case according to the silhouette method the optimal number of clusters would be 2.
+
+Although  there are some libraries that allow us to analyze different type of methods to define the optimal number of clusters.
+
+
+```{r}
+library(NbClust)
+NbClust(X, min.nc = 2, max.nc = 10,  method = "kmeans") 
+```
+
+As we can observe following the majority rule (that is to say, taking into account all the results of the different algorithms performed which is the most "common") in this case we should perform 4 clusters.
+
+
+As we have explained before, due to having "outliers" (which are not as they are actually regions that exists and as we are studying regions capital cities/regions will be richer than the rest we cannot "delete" them) for that matter we will scale the data previous to analyzing the KMeans algorithm.
+
+
+```{r}
+
+kmeans <- kmeans(scale(X),4) #kmeans(datos,nºclusters)                   
+
+print(kmeans)
+
+```
+It is important when analyzing the results (the average values of each cluster individual) that if we scale we lose interpretation in terms of total value, although we can observe and compare between clusters for example we observe that cluster 2 correspond to clusters really "rich" in comparison to the others, or cluster 4 corresponding to cluster with a low value across the years. 
+
+
+Another thing we can do is adding the kmeans cluster etiquette to the original data and then performing the average of each cluster in the following way:
+
+```{r}
+aggregate(X, by=list(cluster=kmeans$cluster), mean)  
+```
+
+```{r}
+tgs0003cluster <- cbind(tgs00003_wide, cluster = kmeans$cluster)
+head(tgs0003cluster)
+```
+
+
+```{r}
+fviz_cluster(kmeans, data = X,
+             palette = c("YlGnBu"), 
+             geom = "point",
+             ellipse.type = "convex", 
+             ggtheme = theme_bw()
+             )
+```
+
+As we can observe the "4th cluster" corresponds to Paris (FR10) as we can observe in the following graph too with the etiquette of each region.
+
+Both graphs serve different purposes as they are visualized in a different way as the second one is taking into account ellipses (which for the 4th cluster there is no ellipse as it just consists of one data point). It would be interesting to see the same plot if we decide to go for 3 or 2 clusters to see what happens with FR10 (if it continues being a one single individual cluster)
+
+
+```{r}
+fviz_cluster(kmeans, data = X, geom = c("point"),ellipse.type = 'norm', pointsize=1)+
+  theme_minimal()+geom_text(label=regions,hjust=0, vjust=0,size=2,check_overlap = F)+scale_fill_brewer(palette="Paired")
+```
+  
+  
+  
+If we plot the clusters in the Map
+
+
+
+```{r}
+tgs00003_shp123 <- tgs0003cluster |>
+  select(geo, cluster) |> 
+  right_join(SHP_2_3035, by = "geo") |> 
+  st_as_sf()
+
+```
+
+
+```{r}
+tgs00003_shp123 |>
+  ggplot(aes(fill = factor(cluster))) +  # Convert 'cluster' to a factor
+  geom_sf(size = 0.1, color = "#333333") +
+  scale_fill_manual(  # Use scale_fill_manual for factor variables
+    values = brewer_pal(palette = "Paired")(length(unique(tgs00003_shp123$cluster))),
+    name = "Kmeans Cluster", 
+    na.value = "gray80",
+    guide = guide_legend(title.position = "top", 
+                         label.position = "right")
+  ) +
+  scale_x_continuous(limits = c(2500000, 7000000)) +
+  scale_y_continuous(limits = c(1600000, 5200000)) +
+  labs(
+    title = "Regional gross domestic product",
+    subtitle = "by NUTS 2 regions - million EUR",
+    caption = "Data: Eurostat tgs00003"
+  ) +
+  theme_void() +
+  theme(legend.position = c(0.94, 0.70))
+
+```
+
+This map allow us to understand how do they locate each cluster across the map, it would be interesting to locate the capital cities in the map to see the influence they have on nearby regions. Another thing to consider is that the "legend" of the cluster do not give any extra information, that is to say if a cluster is 1 it does not mean that they have a higher value in terms of regional gross domestic product, as we have observed the cluster 4 is the one with the highest value (also, if we ran again the algorithm the number it may change for that reason it may not be in the final result that the cluster 4 is the highest one), for that matter as KMeans has some "random" component or attribute in its algorithm as it depends on where the first initial clusters are placed, it would be interesting to recode the tags, or give them an actual name (mainly in the business sense if we were working with clients such as top clients, one hit wonder clients among other ideas).
+
+
+# Hierarchical clustering
+
+Important to decide distance between observations and linkage to join groups
+
+We need to decide first the distance and linkage
+
+
+```{r, echo=FALSE}
+
+# basic hierarchical clustering
+d = dist(scale(X), method = "euclidean")
+hc <- hclust(d, method = "ward.D2") 
+```
+
+
+```{r}
+hc$labels <- regions
+
+fviz_dend(x = hc, 
+          k=4,
+          palette = "Set2", 
+          rect = TRUE, rect_fill = TRUE, cex=0.5,
+          rect_border = "Set2"          
+)
+```
+
+As we can observe in this case it follows the same pattern as KMeans algorithm as we can observe, there a one individual cluster which I assume is FR10 again, although due to how the plot works due to the amount of "regions" we could visualize it in another way.
+
+
+```{r}
+fviz_dend(x = hc,
+          k = 4,
+          color_labels_by_k = TRUE,
+          cex = 0.8,
+          type = "phylogenic",
+          repel = TRUE)+  labs(title="Regional Gross GDP tree clustering of the world") + theme(axis.text.x=element_blank(),axis.text.y=element_blank()) 
+```
+
+
+This type of plot allows us to compare the different regions of the clusters following the tree map, as we can observe our hypothesis that the single individual cluster was still FR10, in this plot we can observe it with no problem, one issue with this plot again is that we are analyzing the codes of the regions and we do not know exactly which regions they are unless they are plotted in a map.
+
+```{r}
+tgs0003clusterhierarc <- cbind(tgs00003_wide, cluster = cutree(hc, k = 4))
+```
+
+
+```{r}
+tgs00003_shp123hier <- tgs0003clusterhierarc |>
+  select(geo, cluster) |> 
+  right_join(SHP_2_3035, by = "geo") |> 
+  st_as_sf()
+
+```
+
+
+```{r}
+tgs00003_shp123hier |>
+  ggplot(aes(fill = factor(cluster))) +  # Convert 'cluster' to a factor
+  geom_sf(size = 0.1, color = "#333333") +
+  scale_fill_manual(  # Use scale_fill_manual for factor variables
+    values = brewer_pal(palette = "Paired")(length(unique(tgs00003_shp123$cluster))),
+    name = " Hierarchical Cluster", 
+    na.value = "gray80",
+    guide = guide_legend(title.position = "top", 
+                         label.position = "right")
+  ) +
+  scale_x_continuous(limits = c(2500000, 7000000)) +
+  scale_y_continuous(limits = c(1600000, 5200000)) +
+  labs(
+    title = "Regional gross domestic product",
+    subtitle = "by NUTS 2 regions - million EUR",
+    caption = "Data: Eurostat tgs00003"
+  ) +
+  theme_void() +
+  theme(legend.position = c(0.94, 0.70))
+
+```
+
+Once again, it would be interesting to recode the variables so they match as much as possible to spot any differences between the type of clusters/regions in both maps, and even giving an etiquette depending on the mean values of the clusters to symbolize the differences in value between clusters.
+
+## Club Convergence
+
+In this case for this specific type of data there is a methodology which seems more suitable than KMeans or Hierarchical clustering due to not taking into account that the data is longitudinal and taking each variable as a different instance rather than all being a time-series.
+
+This methodology is known as Club Convergence which was developed by Phillips and Sul (2007) and thhe main objective is to identify the various clubs that might be in a sample following the idea of convergence and transitional paths commonly studied in "economics".
+
+The following process represents how this algorithm works:
+
+*	Cross-section classification: The different countries are ordered in decreasing order, i.e., from highest to lowest, taking into account the values of the last period.
+	
+*	Club formation: We start by forming groups from the country with the highest value in the last period. Then we look for the first k such that when we do the log t regression test statistic, we are left with t_k being greater than-1.65. This is done for the first two countries, and in case it is not satisfied, it is performed for the second and third countries, and so on until a pair of countries is found that does satisfy the test. In case there is no pair of countries, i.e., there is no k that meets this requirement, there would be no convergence subgroups in our data sample.
+	
+*	Screening of individuals to create convergence clubs: In the event that in the club formation, we have encountered a pair, we proceed to perform the same test by adding countries in the order we previously classified. When the criterion is no longer met, we would have our first club.
+	
+*	Recursion and stopping rule: A subgroup is made with the individuals that have not been screened in the previous step. The log t regression test is performed and if it is greater than -1.65, another group is formed. Otherwise, the three previous steps would be performed with this subgroup.
+
+Schnurbus et al., (2017) would pose a fifth step, which is to merge clubs. The way it would be done would be to do the log t test regression for clubs 1 and 2, and in case it is met, we would then merge them. The same would then be done for the new club 1 and the next club, and so on until there are no more club mergers, so we would be left with the minimum number of clubs possible.
+
+
+However, for details, you can follow the work of Phillips and Sul (2007, 2009) and Du (2017) which are easily accessible, the overall information can be seen on the work made by Du that contains everything to know about the PS methodology the merge rule, and how to replicate the analysis in Stata. The link to the academic publication is the following one: https://journals.sagepub.com/doi/10.1177/1536867X1801700407.
+
+On the other hand, as Stata is not open source it has been developed in R in the following library called [ClubConvergence](https://cran.r-project.org/web/packages/ConvergenceClubs/ConvergenceClubs.pdf)
+
+
+The main objective is to apply this algorithm and analyze the differences in comparison to the other cluster methodologies.
+
+```{r}
+
+
+
+df_long <- tgs00003 |> 
+  select(geo, TIME_PERIOD, values)
+
+
+df_wide <- df_long |>
+    pivot_wider(names_from = TIME_PERIOD, values_from = values) |>
+    as.data.frame()
+
+
+logvalues <- log(df_wide[,-1]) |>  select(-"2022")
+
+
+filteredvalues <- apply(logvalues, 1,
+                    function(x){mFilter::hpfilter(x, freq=400, type="lambda")$trend} )
+
+
+filteredvalues <- data.frame(Geo = df_wide[,1], t(filteredvalues), stringsAsFactors=FALSE ) 
+
+
+
+
+df_wide <- df_wide |> 
+  select(-"2022") |> 
+  filter( geo != "HUZZ")
+
+
+
+colnames(filteredvalues) <- colnames(df_wide)
+
+filteredvalues <- filteredvalues |> 
+  filter(geo != "HUZZ")
+
+h <- computeH(filteredvalues[,-1], quantity = "h")
+
+df_h <- data.frame(h)
+
+geo_names <- df_wide |> 
+  select(geo)
+
+
+h_wide <- cbind(geo_names, df_h)
+head(h_wide)
+
+h_long <- pivot_longer(h_wide,
+             starts_with("X"), 
+             names_to = "year",
+             names_prefix = "X",
+             values_to = "h")
+
+
+clubs <- findClubs(df_wide, 
+                   dataCols=2:ncol(filteredvalues), 
+                   unit_names = 1, 
+                   refCol=ncol(filteredvalues),
+                   time_trim =0.3, 
+                   cstar=0, 
+                   HACmethod = 'FQSB')
+
+mclubs <- mergeClubs(clubs, mergeMethod='vLT', mergeDivergent=FALSE)
+
+
+plot(mclubs, clubs=NULL, avgTP = TRUE, legend=TRUE, plot_args=list(type='o', xmarks=seq(1,11,1),  xlab= "", xlabs=seq(2011,2021,1),xlabs_dir=1), legend_args=list(max_length_labels=10, y.intersp=1, cex= 0.5))
+
+
+
+plot(mclubs, clubs=1, avgTP=FALSE, legend=TRUE, plot_args=list(type='o', xmarks=seq(1,11,1), xlabs=seq(2011,2021,1), xlab= "", ylab= "h",
+        legend_args=list(y.intersp=0.01, cex= 0.1))) 
+
+plot(mclubs, clubs=7, avgTP=FALSE, legend=TRUE, plot_args=list(type='o', xmarks=seq(1,11,1), xlabs=seq(2011,2021,1), xlab= "", ylab= "h",
+        legend_args=list(y.intersp=0.01, cex= 0.1)))  
+
+summary(mclubs)
+print(mclubs)
+
+
+tp <- transition_paths(clubs, output_type = 'data.frame') 
+
+
+
+
+```
+
+In case we want to plot another clubs we can use:  
+
+plot(mclubs, clubs=1, avgTP=FALSE, legend=TRUE, plot_args=list(type='o', xmarks=seq(1,11,1), xlabs=seq(2011,2021,1), xlab= "", ylab= "h",
+        legend_args=list(y.intersp=0.01, cex= 0.1)))
+        
+And change the parameter "clubs=".
+```{r}
+merged_df <- merge(tgs00003_wide, tp, by.x = "geo", by.y = "unit_name", all.x = TRUE)
+
+```
+
+```{r}
+tgs00003_shpmerged_df <- merged_df |>
+  select(geo, club) |> 
+  right_join(SHP_2_3035, by = "geo") |> 
+  st_as_sf()
+
+```
+
+
+```{r}
+
+tgs00003_shpmerged_df$club <- factor(tgs00003_shpmerged_df$club, levels = c("club1", "club2", "club3", "club4", "club5", "club6", "club7", "club8", "club9", "club10", "club11", "club12", "club13", "club14", "club15", "divergent"))
+
+tgs00003_shpmerged_df |>
+  ggplot(aes(fill = factor(club))) +  # Convert 'cluster' to a factor
+  geom_sf(size = 0.1, color = "#333333") +
+  scale_fill_manual(  # Use scale_fill_manual for factor variables
+    values =  c("dodgerblue2", "#E31A1C", "green4","#6A3D9A", "#FF7F00", "skyblue2", "#FB9A99", "palegreen2", "#CAB2D6", "#FDBF6F", "khaki2", "maroon", "orchid1","steelblue4", "black", "yellow4")
+,
+    name = " Club Convergence Cluster", 
+    na.value = "gray80",
+    guide = guide_legend(title.position = "top", 
+                         label.position = "right")
+  ) +
+  scale_x_continuous(limits = c(2500000, 7000000)) +
+  scale_y_continuous(limits = c(1600000, 5200000)) +
+  labs(
+    title = "Regional gross domestic product",
+    subtitle = "by NUTS 2 regions - million EUR",
+    caption = "Data: Eurostat tgs00003"
+  ) +
+  theme_void() +
+  theme(legend.position = c(0.94, 0.70))
+
+```
+
+
+To conclude the analysis, we have seen that the way we construct our database may vary the data, and that KMeans, and common clustering algorithms do not seem suitable with this type of data in comparison to the ClubConvergence algorithm which is more suitable in most cases, it is important to notice that we could possibly combine both methodologies, that is to say take into account a first cluster algorithm taking into account several time-series data on regions to perform PCA on each individually, combine the first components of each, then cluster the data and run a simple classification algorithm to obtain the feature importance to build an "index" to later on perform the ClubConvergence algorithm. These are all ideas we could do to perform a workflow to analyze not only one variable throughout a certain time period but rather account for several different variables in the same time period as a way to analyze clusters across the European Union countries taking into account GDP, Unemployment Rate among other ideas.
+
+Analyzing clusters may help policy makers understand where to focus the financial aid or any other type aid, as well as ClubConvergence tags allowing to compare them easily, that is  to say Club1 is better off than Club2 and so on, meaning that "lower value clubs" need more aid than higher ones in the classification opposed to KMeans algorithm that needs more detail on the tags of the KMeans as it depends on when you ran the algorithm due to the random component on the first place centroids are located as explain on the methodology.
+
+It is interesting to compare them, and this project served as an initial point to do so, explaining the advantages and disadvantages each algorithm has and their different purpose and their respective use. We may also combine this methods to analyze more in detail different variables across time to cluster countries as explained above.
+
+The data set analyzed may not be the perfect example to analyze  convergence clubs as we may take into account the population of each region to account for differences in size, which can be done easily manipulating the original data set.
+
+
+All the code is easily replicable as no local data set has been used, everything has been done through libraries available and the data set has been obtained through the data set Eurostat. All clusters serve their own purpose and has their own strengths so it is interesting to analyze as much of them as possible as depending on the context one is more suitable than the others.
+
